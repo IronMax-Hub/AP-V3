@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main, development]
+  pull_request:
+    branches: [main, development]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ap
+          POSTGRES_PASSWORD: ap
+          POSTGRES_DB: ap_v3
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ap -d ap_v3"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql+asyncpg://ap:ap@localhost:5432/ap_v3
+      REDIS_URL: redis://localhost:6379/0
+      TOKEN_HASH_SECRET: ci-test-secret
+      APP_PASS_PHRASE: ci-test-secret
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Format check (black)
+        run: black --check .
+
+      - name: Alembic upgrade head
+        run: alembic upgrade head
+
+      - name: Run tests
+        run: pytest --cov=app -v

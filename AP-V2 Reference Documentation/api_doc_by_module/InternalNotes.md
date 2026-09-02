@@ -1,0 +1,54 @@
+# InternalNotes Module API Documentation
+
+The `InternalNotes` module lets admin/staff attach free-text notes to a student record (`students_internal_notes`), with an edit-history trail (`internal_notes_history`) preserved on every update/delete. Registered entirely via `Route::apiResource('internal_notes', 'InternalNotesController')` — no custom routes beyond the standard RESTful set, and even that set is incomplete (see below).
+
+**Module-wide auth:** `auth:sanctum` + `json.response`, prefixed `/api/v1/...`. All of it.
+
+See [`./_COMMON_CONVENTIONS.md`](./_COMMON_CONVENTIONS.md) for the app-wide response envelope styles, standard error shapes, and pagination conventions. `InternalNotesController` (`Modules/InternalNotes/Http/Controllers/InternalNotesController.php`) implements every routed method directly, no traits. Every response in this module uses `$this->apiResponse()` (instance method) consistently — no hand-rolled shapes here.
+
+## Structural note: 3 of the 7 `apiResource` actions are dead/broken
+
+`Route::apiResource('internal_notes', 'InternalNotesController')` registers 7 conventional routes (`index`, `create`, `store`, `show`, `edit`, `update`, `destroy`). **`InternalNotesController` defines only `show`, `store`, `update`, `destroy`** — `index`, `create`, and `edit` have no corresponding controller methods at all. Hitting `GET /v1/internal_notes` (list-all), `GET /v1/internal_notes/create`, or `GET /v1/internal_notes/{id}/edit` throws a framework-level "method does not exist" error (`BadMethodCallException`), not a graceful 404 or a dead Blade-view stub — the same failure mode documented for `Role`'s equivalent gap in `Role.md`. **There is no "list all internal notes" endpoint** in this module at all; the only read path is `show`, which (see below) is keyed by `student_id`, not a note id.
+
+---
+
+### `GET /v1/internal_notes/{id}` (`show`)
+- **⚠️ `{id}` is a `student_id`, not an internal-note id** — confirmed from `StudentInternalNotesRepository::getInternalNotes($id)`: `StudentInternalNotes::where('student_id', $id)->with(['creator'])->get()`. This returns **every** note belonging to that student, not a single note. Passing an actual note's own id here will silently return an **empty collection** (assuming no student happens to share that numeric id), not a 404/error — there is no existence check on the student id at all, so even a completely nonexistent student id also just returns an empty collection with a 200.
+- **Success response:** `StudentInternalNotesResource::collection(...)` — Laravel's default resource-collection auto-wrap, `{"data": [...]}`, **not** wrapped in `$this->apiResponse()` and **no `meta`/pagination** — every note for the student is returned in one unpaginated call.
+- `StudentInternalNotesResource`: raw-merged columns excluding `created_by`/`updated_by`, plus `creator`/`updater` (each `{id, first_name, last_name, email}` or null) — includes raw columns `id`, `student_id`, `history_tab_id`, `notes`, `status`, `is_edited`, timestamps.
+
+### `POST /v1/internal_notes` (`store`)
+- **Request body** (`StoreStudentInternalNotesRequest`): `student_id` required integer — **no `exists:students,id` rule**, so a `student_id` referencing a nonexistent student passes validation and fails only at the DB foreign-key-constraint level (the migration defines `student_id` as a `foreignId` with `cascadeOnDelete` against `students.id`) — expect a raw `QueryException` (likely surfacing as an uncaught 500), not a clean 422, for an invalid `student_id`; `notes` required string max:255.
+- **Behavior:** `created_by` is forced server-side to `auth()->user()->id` (appended via `$request->request->add(...)`, not client-settable); `updated_at` explicitly forced to `null` on creation (redundant given a fresh row already has no `updated_at`, but present in source).
+- **Success response:** `$this->apiResponse(['notes' => StudentInternalNotesResource::make($freshlyCreatedNote)], 'Student Internal Notes created successfully', statusCode: 201)`.
+- **Side effects:** none beyond the single insert — no activity log, no history row written on create (history rows are only ever written on `update`/`destroy`, see below).
+
+### `PUT`/`PATCH /v1/internal_notes/{id}` (`update`)
+- Raw `$id` param (not route-model-bound) — `$this->apiResponse([], 'Internal Note Not Found', 'error', 404)` if the id doesn't resolve via the repository (this error message correctly says "Internal Note", unlike `destroy`'s equivalent — see below).
+- **Request body** (`UpdateStudentInternalNotesRequest`): `notes` required string max:255 — **`student_id` is not accepted/changeable here at all**.
+- **Behavior (in `DB::transaction()`):** first **copies the note's current (pre-update) text into `internal_notes_history`** (`student_id`, `internal_note_id` = the note's own `history_tab_id` if already set, else the note's own `id` — i.e. all history rows for a given note chain back to the **original** note's id, not the immediately-preceding revision's id; `notes` = the old text; `created_by` = the **original note's** `created_by`, not the editor performing this update) — **then** overwrites the live note: sets `history_tab_id` to that same resolved value (so after the first edit, `history_tab_id` becomes permanently non-null and stays pointed at the original note's own id for every subsequent edit), `notes` = new text, `is_edited = '1'` (string, not int/bool), `updated_by` = the current caller's id.
+- **Success response:** `$this->apiResponse(['notes' => StudentInternalNotesResource::make($freshNote)], 'Internal Note Updated Successfully')`.
+- **Notes:** `InternalNotesHistoryResource` (`Modules/InternalNotes/Http/Resources/InternalNotesHistoryResource.php`) exists and is presumably intended to shape history-row output, but **it is never referenced by any controller method in this module** — confirmed by grep, its own file is the only occurrence of the class name. **There is no route anywhere in this module that reads `internal_notes_history` rows back** — history is write-only from the API's perspective; a QA client cannot fetch a note's edit history through this module's endpoints at all, only infer that history rows exist indirectly (e.g. via direct DB access, which is out of scope for API parity testing).
+
+### `DELETE /v1/internal_notes/{id}` (`destroy`)
+- Same hand-rolled 404 pattern as `update` (raw `$id`, repository lookup) — **but the error message here is `'Student Not Found'`**, not "Internal Note Not Found," even though the actual failed condition is "no internal note with this id" — a misleading error-text bug carried over verbatim from (likely) copy-pasted boilerplate; matches the existing finding in `documentation/API_SPECIFICATIONS.md`.
+- **Behavior (in `DB::transaction()`):** deletes the live note (`$this->studentInternalNoteRepo->delete($id)` — the `students_internal_notes` table has `softDeletes()` per its migration, so this is very likely a soft delete, though the repository's `delete()` implementation itself wasn't independently re-verified here — treat as soft-delete-shaped unless a direct query proves otherwise) **then** writes a history row: `internal_note_id` = the deleted note's own `id` (note: **unlike `update`, this does NOT resolve through `history_tab_id` first** — if the note being deleted was itself already an edited note with a `history_tab_id` pointing at some earlier original, this delete-triggered history row still references the just-deleted note's own id, breaking the "always chain to the original" convention that `update` maintains), `status = '0'` (distinguishing a delete-triggered history entry from an update-triggered one, which has no explicit `status` field set and therefore takes the column's default), `created_by` = the deleted note's original `created_by` (not the caller performing the delete).
+- **Success response:** `$this->apiResponse([], 'Internal Notes deleted successfully')`.
+- **Notes:** the history row survives even after the live note is gone (per the migration, `internal_notes_history` has no `softDeletes()`/cascade tie to the live note's lifecycle) — but as noted above, nothing in this module's routes can read it back.
+
+---
+
+## Summary
+
+**Routes documented:** 4 live/functional actions (`show`, `store`, `update`, `destroy`) out of 7 `apiResource('internal_notes', ...)` registrations — `index`/`create`/`edit` have no controller methods and throw on any request.
+
+**Notable bugs/discrepancies found:**
+- `GET /v1/internal_notes/{id}` treats `{id}` as a `student_id`, returning **all** of that student's notes rather than a single note by its own id — confirmed and unchanged from `documentation/API_SPECIFICATIONS.md`'s existing note. A genuine note id (or a nonexistent student id) silently returns an empty `{"data":[]}`, never a 404.
+- `index`/`create`/`edit` are registered by `apiResource` but have zero implementation — any request to them throws a framework-level missing-method error, the same failure class documented for `Role.md`'s `create`/`edit`. There is no way to list all internal notes across students through this API at all.
+- `destroy`'s 404 error message reads `"Student Not Found"` for what is actually a note-not-found condition — misleading text, confirmed unchanged from the existing spec note.
+- `InternalNotesHistoryResource` is a confirmed orphaned class — never invoked by any live route. History rows exist (written by both `update` and `destroy`) but are unreadable through this module's API surface; a parity test cannot verify history-row content via HTTP, only the resulting `history_tab_id`/`is_edited` flags on the live note (for `update`) or the note's disappearance (for `destroy`).
+- `update`'s history-chaining (`internal_note_id` always resolves to the **original** note's id via `history_tab_id`) and `destroy`'s history-chaining (`internal_note_id` = the just-deleted note's own id, no `history_tab_id` resolution) are inconsistent with each other — a note that was edited at least once, then deleted, produces a delete-history row whose `internal_note_id` breaks the "always points at the original" pattern every update-history row maintains.
+- `store` has no `exists:students,id` validation on `student_id` — an invalid id passes the FormRequest and fails only at the DB constraint layer, likely surfacing as an uncaught 500 rather than a clean 422.
+- `is_edited` is written as the string `'1'`, not an integer/boolean `1`/`true` — preserve the exact type if a parity test asserts on this field.
+
+**Confidence:** High — every endpoint read directly from `InternalNotesController.php` (full file, all 4 live methods), both FormRequest classes, `StudentInternalNotesResource.php`, `InternalNotesHistoryResource.php` (confirmed orphaned via grep), the repository's `getInternalNotes()` method, and both migrations (for column names/constraints/soft-delete presence).

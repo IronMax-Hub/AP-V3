@@ -157,6 +157,13 @@ ENV/
 env.bak/
 venv.bak/
 
+# UAT credentials for scripts/api_parity_check (see parity_check.env.example) — never commit real tokens
+parity_check.env
+
+# api_parity_check run output (JSON reports, saved curl files) — regenerated per run
+scripts/api_parity_check/reports/*
+!scripts/api_parity_check/reports/.gitkeep
+
 # Spyder project settings
 .spyderproject
 .spyproject

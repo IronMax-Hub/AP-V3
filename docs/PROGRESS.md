@@ -68,6 +68,15 @@ Phase 1 is far enough along to know the real shape of what's blocked on it.
 Freeform, dated. Anything discovered mid-work that isn't a clean phase checklist item goes here —
 bugs, follow-ups, questions that came up, things deferred on purpose.
 
+- **2026-09-05** — Added `scripts/api_parity_check/` — a standalone CLI (not pytest, not
+  CI-wired) that hits both UAT deployments for the same logical request and checks status code,
+  full response body (recursive diff), and the exact curl command used, all matching modulo host
+  + auth-token value. This is the manual side of the §11.3 parity mandate; the automated
+  `tests/contract/` suite driven by seeded data is still unbuilt. Seeded with one real endpoint
+  (`countries`, §2 of `API_SPECIFICATIONS.md`) as a template — it currently fails on the v3 side
+  since Phase 1 isn't built yet, which is expected. Needs real UAT base URLs + tokens in a local
+  `parity_check.env` (gitignored, never committed) to actually run against UAT; see the tool's own
+  README for setup. Add one `Endpoint` entry per endpoint as it ships, per-phase.
 - **2026-09-02** — Docker containers were never actually built/run end-to-end in the sandbox this
   scaffolding was built in (no `docker` group membership, no passwordless `sudo`). Compose config
   validated syntactically; `docker compose up --build` + a `curl localhost:8000/health` still needs
@@ -84,5 +93,6 @@ bugs, follow-ups, questions that came up, things deferred on purpose.
 Append a line each time this file changes meaningfully — newest first. Keep it short; git history
 has the detail.
 
+- **2026-09-05** — Added `scripts/api_parity_check/` (UAT parity-checking CLI), see Backlog above.
 - **2026-09-02** — File created. Phase 0 marked done. Phase 1 checklist drafted from
   `MIGRATION_PLAN.md` §5.
